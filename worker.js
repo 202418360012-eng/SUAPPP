@@ -159,90 +159,83 @@ export default {
 
                 const authCookies = parseCookies(loginRes.headers) || initialCookies;
 
-                // Tenta buscar o HTML do perfil completo e da aba de diários em conjunto
-                const urlsParaBuscar = [
-                    "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/",
-                    "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=diarios",
-                    "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim"
-                ];
+                // Acessa a aba específica do boletim
+                const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
+                const res = await fetch(boletimUrl, {
+                    headers: { 'User-Agent': userAgent, 'Cookie': authCookies }
+                });
+                const html = await res.text();
 
-                let combinedHtml = "";
-                for (const targetUrl of urlsParaBuscar) {
-                    const res = await fetch(targetUrl, {
-                        headers: { 'User-Agent': userAgent, 'Cookie': authCookies }
-                    });
-                    combinedHtml += await res.text() + "\n";
-                }
+                // Termos cadastrais para descartar do relatório
+                const termosIgnorados = [
+                    "matrícula", "integrado", "técnico", "curso", "ingresso", "cota", "lugar",
+                    "matutino", "vespertino", "noturno", "expedição", "diploma", "pesquisa",
+                    "observação", "aluno", "sistec", "mec", "impressão", "referência", "suap",
+                    "consepe", "resolução", "valença", "nível", "médio"
+                ];
 
                 const dadosMaterias = [];
                 const materiasEncontradas = new Set();
 
-                // Padrão 1: Links de diários (ex: /edu/diario/12345/)
-                const diarioRegex = /<a[^>]*href=["']\/edu\/diario\/[0-9]+\/["'][^>]*>([\s\S]*?)<\/a>/gi;
-                let match;
+                // Extrai especificamente as linhas das tabelas do boletim escolar
+                const trMatches = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
-                while ((match = diarioRegex.exec(combinedHtml)) !== null) {
-                    let nomeMateria = cleanText(match[1]);
+                for (const tr of trMatches) {
+                    const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+                    if (tdMatches.length < 3) continue;
 
-                    if (!nomeMateria || nomeMateria.includes("${") || nomeMateria.includes("{{") || nomeMateria.length < 3) continue;
+                    const cols = tdMatches.map(cleanText);
+                    let disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
 
-                    if (nomeMateria.includes("-")) {
-                        const partes = nomeMateria.split("-");
+                    if (!disciplina) continue;
+
+                    const discLower = disciplina.toLowerCase();
+
+                    // Ignora qualquer campo do perfil do aluno
+                    const ehIgnorado = termosIgnorados.some(termo => discLower.includes(termo));
+                    if (ehIgnorado || !isNaN(disciplina) || disciplina.length < 4) continue;
+
+                    // Formata nomes que contêm códigos (Ex: "INF.01 - MATEMÁTICA" -> "MATEMÁTICA")
+                    if (disciplina.includes("-")) {
+                        const partes = disciplina.split("-");
                         if (partes.length > 1 && partes[0].trim().length <= 12) {
-                            nomeMateria = partes.slice(1).join("-").trim();
+                            disciplina = partes.slice(1).join("-").trim();
                         }
                     }
 
-                    const key = nomeMateria.toLowerCase();
-                    if (!materiasEncontradas.has(key)) {
-                        materiasEncontradas.add(key);
-                        dadosMaterias.push({
-                            disciplina: nomeMateria,
-                            total_aulas: 80,
-                            faltas: 0,
-                            freq_atual: "100%",
-                            limite_max: 20,
-                            restantes: 20
-                        });
-                    }
-                }
+                    if (materiasEncontradas.has(disciplina.toLowerCase())) continue;
+                    materiasEncontradas.add(disciplina.toLowerCase());
 
-                // Padrão 2: Células de tabela de componentes curriculares
-                if (dadosMaterias.length === 0) {
-                    const trMatches = combinedHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
-                    for (const tr of trMatches) {
-                        const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                        if (tdMatches.length < 2) continue;
+                    // Busca valores reais nas colunas do boletim
+                    let totalAulas = 80;
+                    let faltas = 0;
+                    let freq = "100%";
 
-                        const cols = tdMatches.map(cleanText);
-                        let disc = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
-
-                        if (!disc || disc.includes("${") || disc.toLowerCase().includes("componente") || disc.length < 4) continue;
-
-                        if (disc.includes("-")) {
-                            const partes = disc.split("-");
-                            if (partes.length > 1 && partes[0].trim().length <= 12) {
-                                disc = partes.slice(1).join("-").trim();
-                            }
-                        }
-
-                        const key = disc.toLowerCase();
-                        if (!materiasEncontradas.has(key)) {
-                            materiasEncontradas.add(key);
-                            dadosMaterias.push({
-                                disciplina: disc,
-                                total_aulas: 80,
-                                faltas: 0,
-                                freq_atual: "100%",
-                                limite_max: 20,
-                                restantes: 20
-                            });
+                    for (const colVal of cols) {
+                        if (colVal.includes("%")) {
+                            freq = colVal;
+                        } else if (!isNaN(colVal) && colVal !== "") {
+                            const valNum = parseInt(colVal, 10);
+                            if (valNum >= 30 && valNum <= 240) totalAulas = valNum;
+                            else if (valNum >= 0 && valNum < 30) faltas = valNum;
                         }
                     }
+
+                    const limiteMax = Math.floor(totalAulas * 0.25);
+                    const restantes = limiteMax - faltas;
+
+                    dadosMaterias.push({
+                        disciplina,
+                        total_aulas: totalAulas,
+                        faltas,
+                        freq_atual: freq,
+                        limite_max: limiteMax,
+                        restantes
+                    });
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina foi encontrada para a matrícula " + usuario + ". Certifique-se de que o período letivo atual está ativo na sua conta." }), {
+                    return new Response(JSON.stringify({ erro: "Apenas dados cadastrais foram encontrados no boletim." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
