@@ -174,73 +174,49 @@ export default {
                     if (tr.includes('colspan') || tr.includes('<thead>') || tr.includes('<th>')) continue;
 
                     const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                    if (tdMatches.length < 4) continue;
+                    if (tdMatches.length < 6) continue;
 
                     const cols = tdMatches.map(cleanText);
 
-                    let disciplina = cols[1] && cols[1].length > 2 ? cols[1] : cols[0];
+                    let disciplina = cols[1];
                     if (!disciplina) continue;
 
                     const discLower = disciplina.toLowerCase();
+                    if (discLower.includes("total") || discLower.includes("componente")) continue;
 
-                    if (discLower.includes("cláudio") || discLower.includes("freire") || 
-                        discLower.includes("componente") || discLower.includes("aulas") || 
-                        discLower.includes("total") || !isNaN(disciplina)) {
-                        continue;
-                    }
-
+                    // Limpa código da disciplina (ex: "TIN.0281 - Banco de Dados" -> "Banco de Dados")
                     if (disciplina.includes("-")) {
                         const partes = disciplina.split("-");
-                        if (partes.length > 1 && partes[0].trim().length <= 12) {
+                        if (partes.length > 1) {
                             disciplina = partes.slice(1).join("-").trim();
                         }
                     }
 
                     if (materiasEncontradas.has(disciplina.toLowerCase())) continue;
-
-                    // Procura o valor percentual de frequência e valores numéricos da linha
-                    let freqVal = 100;
-                    let totalAulas = 80;
-                    let aulasDadas = 0;
-                    let numValores = [];
-
-                    for (const col of cols) {
-                        if (col.includes("%")) {
-                            freqVal = parseFloat(col.replace("%", "").replace(",", ".")) || 100;
-                        } else if (!isNaN(col) && col !== "") {
-                            numValores.push(parseInt(col, 10));
-                        }
-                    }
-
-                    if (numValores.length >= 1) {
-                        const cargas = numValores.filter(v => v >= 30 && v <= 240);
-                        if (cargas.length > 0) totalAulas = cargas[0];
-                    }
-
-                    // Aulas ministradas até o momento
-                    if (numValores.length >= 2) {
-                        const dadas = numValores.filter(v => v > 0 && v < totalAulas);
-                        if (dadas.length > 0) aulasDadas = dadas[0];
-                    }
-
-                    // Cálculo de faltas reais
-                    let faltas = 0;
-                    if (freqVal < 100) {
-                        const percentualPerdido = (100 - freqVal) / 100;
-                        const baseCalculo = aulasDadas > 0 ? aulasDadas : totalAulas;
-                        faltas = Math.round(baseCalculo * percentualPerdido);
-                        if (faltas === 0) faltas = 1;
-                    }
-
                     materiasEncontradas.add(disciplina.toLowerCase());
 
-                    const limiteMax = Math.floor(totalAulas * 0.25);
+                    // Extração exata baseada nas colunas do SUAP vistas no print
+                    // cols[2] = Carga Horária Total (C.H., ex: "72 Aulas")
+                    const chMatch = cols[2].match(/\d+/);
+                    const cargaHorariaTotal = chMatch ? parseInt(chMatch[0], 10) : 72;
+
+                    // cols[4] = Total de Faltas (T. Faltas)
+                    const faltas = parseInt(cols[4], 10) || 0;
+
+                    // cols[5] = Porcentagem de Frequência (% Freq.)
+                    let freqVal = 100;
+                    const freqTexto = cols[5];
+                    if (freqTexto.includes("%")) {
+                        freqVal = parseFloat(freqTexto.replace("%", "").replace(",", ".")) || 100;
+                    }
+
+                    const limiteMax = Math.floor(cargaHorariaTotal * 0.25);
                     const restantes = limiteMax - faltas;
                     const freqFormatada = freqVal.toFixed(2) + "%";
 
                     dadosMaterias.push({
                         disciplina,
-                        total_aulas: totalAulas,
+                        total_aulas: cargaHorariaTotal,
                         faltas,
                         freq_atual: freqFormatada,
                         limite_max: limiteMax,
