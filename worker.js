@@ -89,8 +89,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-function stripTags(html) {
-    return html.replace(/<[^>]*>/g, '').trim();
+function cleanText(html) {
+    return html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
 export default {
@@ -150,32 +150,47 @@ export default {
                 }
 
                 const authCookie = postRes.headers.get('set-cookie') || setCookie;
-                const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
-                const boletimRes = await fetch(boletimUrl, {
+                
+                // Requisição para a página principal do aluno
+                const alunoUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/";
+                const alunoRes = await fetch(alunoUrl, {
                     headers: { 'Cookie': authCookie }
                 });
-                const boletimHtml = await boletimRes.text();
+                const alunoHtml = await alunoRes.text();
 
-                const trBlocks = boletimHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+                // Regex para capturar linhas de tabelas de diários/boletim
+                const trBlocks = alunoHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
                 const dadosMaterias = [];
                 let textoMensagem = "📊 *BOLETIM SUAP - CONTROLE DE FALTAS*\n\n";
 
                 for (const tr of trBlocks) {
                     const tdBlocks = tr.match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi) || [];
-                    const cols = tdBlocks.map(stripTags);
+                    if (tdBlocks.length < 3) continue;
 
-                    if (cols.length < 3) continue;
+                    const cols = tdBlocks.map(cleanText);
+                    const trRaw = tr.toLowerCase();
 
-                    const trTexto = tr.toLowerCase();
-                    if (trTexto.includes('manual') || trTexto.includes('${') || trTexto.includes('c.h.')) continue;
+                    if (trRaw.includes('manual') || trRaw.includes('${') || trRaw.includes('c.h.') || trRaw.includes('componente')) {
+                        continue;
+                    }
 
-                    // Busca o texto dentro da tag <a> da coluna da disciplina
+                    // Tenta extrair o nome da disciplina no link <a> ou na segunda coluna
                     let disciplina = "";
                     const aMatch = tr.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
                     if (aMatch) {
-                        disciplina = stripTags(aMatch[1]);
+                        disciplina = cleanText(aMatch[1]);
+                    } else if (cols[1] && cols[1].length > 3) {
+                        disciplina = cols[1];
                     } else {
-                        disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
+                        disciplina = cols[0];
+                    }
+
+                    // Limpa códigos de disciplina prefixados (ex: "INF.001 - MATEMÁTICA" -> "MATEMÁTICA")
+                    if (disciplina.includes('-')) {
+                        const partes = disciplina.split('-');
+                        if (partes.length > 1 && partes[0].trim().length <= 10) {
+                            disciplina = partes.slice(1).join('-').trim();
+                        }
                     }
 
                     if (!disciplina || disciplina.length < 3 || disciplina.includes('${') || disciplina.toLowerCase() === 'manual') {
@@ -191,9 +206,9 @@ export default {
                             freqRaw = val;
                         } else if (!isNaN(val) && val.trim() !== '') {
                             const num = parseInt(val, 10);
-                            if (num > 15 && num <= 200) {
+                            if (num >= 20 && num <= 200) {
                                 totalAulasMateria = num;
-                            } else if (num >= 0 && num <= 60) {
+                            } else if (num >= 0 && num < 20) {
                                 faltasAtuais = num;
                             }
                         }
@@ -222,7 +237,7 @@ export default {
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina válida encontrada no boletim." }), {
+                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina encontrada. Verifique se as notas/faltas já foram publicadas pelo IFBA para o seu usuário." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
