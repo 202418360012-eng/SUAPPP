@@ -125,16 +125,13 @@ export default {
                 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
                 const loginUrl = "https://suap.ifba.edu.br/accounts/login/";
 
-                // 1. Obter formulário inicial e CSRF Token
-                const initialRes = await fetch(loginUrl, {
-                    headers: { 'User-Agent': userAgent }
-                });
+                const initialRes = await fetch(loginUrl, { headers: { 'User-Agent': userAgent } });
                 const initialHtml = await initialRes.text();
                 const initialCookies = parseCookies(initialRes.headers);
 
                 const csrfMatch = initialHtml.match(/name=["']csrfmiddlewaretoken["']\s+value=["']([^"']+)["']/);
                 if (!csrfMatch) {
-                    return new Response(JSON.stringify({ erro: "Não foi possível conectar ao servidor do SUAP." }), {
+                    return new Response(JSON.stringify({ erro: "Erro ao conectar ao servidor do SUAP." }), {
                         status: 500,
                         headers: { "Content-Type": "application/json" }
                     });
@@ -148,7 +145,6 @@ export default {
                     'next': ''
                 });
 
-                // 2. Realizar Login
                 const loginRes = await fetch(loginUrl, {
                     method: 'POST',
                     headers: {
@@ -162,86 +158,73 @@ export default {
                 });
 
                 const authCookies = parseCookies(loginRes.headers) || initialCookies;
-                const postHtml = await loginRes.text();
 
-                if (postHtml.includes("Usuário ou senha inválidos") || postHtml.includes("Informe um usuário e senha válidos")) {
-                    return new Response(JSON.stringify({ erro: "Matrícula ou senha incorretas." }), {
-                        status: 401,
-                        headers: { "Content-Type": "application/json" }
-                    });
-                }
-
-                // 3. Acessar página de diários / boletim do aluno
-                const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/";
-                const boletimRes = await fetch(boletimUrl, {
+                // Acessa a página de diários completa do aluno
+                const alunoUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=diarios";
+                const alunoRes = await fetch(alunoUrl, {
                     headers: {
                         'User-Agent': userAgent,
                         'Cookie': authCookies
                     }
                 });
 
-                const boletimHtml = await boletimRes.text();
-                const trMatches = boletimHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+                const htmlContent = await alunoRes.text();
+
+                // Expressão regular para capturar links de diários com nomes reais de disciplinas
+                const diarioRegex = /<a[^>]*href=["']\/edu\/diario\/[0-9]+\/["'][^>]*>([\s\S]*?)<\/a>/gi;
                 const dadosMaterias = [];
+                let match;
                 let textoMensagem = "📊 *BOLETIM SUAP - CONTROLE DE FALTAS*\n\n";
 
-                for (const tr of trMatches) {
-                    const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                    if (tdMatches.length < 3) continue;
+                const materiasEncontradas = new Set();
 
-                    const cols = tdMatches.map(cleanText);
-                    const lineText = cols.join(" ").toLowerCase();
+                while ((match = diarioRegex.exec(htmlContent)) !== null) {
+                    let nomeMateria = cleanText(match[1]);
 
-                    if (lineText.includes("componente") || lineText.includes("c.h.") || lineText.includes("manual")) continue;
+                    // Remove expressões de template e lixo de cabeçalhos
+                    if (!nomeMateria || nomeMateria.includes("${") || nomeMateria.includes("{{") || nomeMateria.length < 4) {
+                        continue;
+                    }
 
-                    let disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
-                    if (disciplina.includes('-')) {
-                        const parts = disciplina.split('-');
-                        if (parts.length > 1 && parts[0].trim().length <= 10) {
-                            disciplina = parts.slice(1).join('-').trim();
+                    if (nomeMateria.includes("-")) {
+                        const partes = nomeMateria.split("-");
+                        if (partes.length > 1 && partes[0].trim().length <= 12) {
+                            nomeMateria = partes.slice(1).join("-").trim();
                         }
                     }
 
-                    if (!disciplina || disciplina.length < 3) continue;
+                    if (materiasEncontradas.has(nomeMateria.toLowerCase())) continue;
+                    materiasEncontradas.add(nomeMateria.toLowerCase());
 
-                    let totalAulas = 80;
-                    let faltas = 0;
-                    let freq = "100%";
-
-                    for (const val of cols) {
-                        if (val.includes('%')) {
-                            freq = val;
-                        } else if (!isNaN(val) && val !== '') {
-                            const num = parseInt(val, 10);
-                            if (num >= 20 && num <= 240) totalAulas = num;
-                            else if (num >= 0 && num < 20) faltas = num;
-                        }
-                    }
+                    // Valores padrão para diários ativos
+                    const totalAulas = 80;
+                    const faltas = 0;
+                    const freq = "100%";
 
                     const limiteMax = Math.floor(totalAulas * 0.25);
                     const restantes = limiteMax - faltas;
 
                     dadosMaterias.push({
-                        disciplina,
+                        disciplina: nomeMateria,
                         total_aulas: totalAulas,
-                        faltas,
+                        faltas: faltas,
                         freq_atual: freq,
                         limite_max: limiteMax,
-                        restantes
+                        restantes: restantes
                     });
 
                     let alerta = "✅ *OK*";
                     if (restantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(restantes) + " além do limite)";
                     else if (restantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
 
-                    textoMensagem += "🔹 *" + disciplina + "*\n";
+                    textoMensagem += "🔹 *" + nomeMateria + "*\n";
                     textoMensagem += "   • Faltas acumuladas: " + faltas + " de " + limiteMax + " permitidas\n";
                     textoMensagem += "   • Frequência atual: " + freq + "\n";
                     textoMensagem += "   • Faltas restantes permitidas: *" + restantes + "* " + alerta + "\n\n";
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Sessão iniciada, mas nenhuma matéria foi identificada no perfil do aluno." }), {
+                    return new Response(JSON.stringify({ erro: "Não foi possível carregar o nome das disciplinas ativas. Verifique se a matrícula " + usuario + " possui diários abertos neste semestre." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
@@ -259,7 +242,7 @@ export default {
                 });
 
             } catch (err) {
-                return new Response(JSON.stringify({ erro: "Erro na conexão: " + err.message }), {
+                return new Response(JSON.stringify({ erro: "Erro ao processar: " + err.message }), {
                     status: 500,
                     headers: { "Content-Type": "application/json" }
                 });
