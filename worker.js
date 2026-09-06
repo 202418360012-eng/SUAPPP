@@ -159,37 +159,41 @@ export default {
 
                 const authCookies = parseCookies(loginRes.headers) || initialCookies;
 
-                // Acesso direto à URL exata da aba do boletim do aluno
                 const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
                 const res = await fetch(boletimUrl, {
                     headers: { 'User-Agent': userAgent, 'Cookie': authCookies }
                 });
                 const html = await res.text();
 
-                // Isola apenas o conteúdo das tabelas acadêmicas (exclui o cabeçalho de perfil)
-                const boletimSection = html.includes('id="tab_boletim"') 
-                    ? html.split('id="tab_boletim"')[1].split('</div>')[0] 
-                    : html;
+                // Termos gerais de cabeçalho, perfil do aluno ou totais para ignorar
+                const termosInvalidos = [
+                    "matrícula", "integrado", "técnico", "curso", "ingresso", "cota", "lugar",
+                    "matutino", "vespertino", "noturno", "expedição", "diploma", "pesquisa",
+                    "observação", "aluno", "sistec", "mec", "impressão", "referência", "suap",
+                    "aulas", "total", "componente", "carga horária", "frequência", "${"
+                ];
 
-                const trMatches = boletimSection.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+                const trMatches = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
                 const dadosMaterias = [];
                 const materiasEncontradas = new Set();
 
                 for (const tr of trMatches) {
                     const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                    if (tdMatches.length < 3) continue;
+                    if (tdMatches.length < 4) continue;
 
                     const cols = tdMatches.map(cleanText);
 
-                    // A segunda coluna no boletim do SUAP traz o nome da disciplina
                     let disciplina = cols[1] && cols[1].length > 2 ? cols[1] : cols[0];
+                    if (!disciplina) continue;
 
-                    if (!disciplina || disciplina.toLowerCase().includes("componente") || disciplina.toLowerCase().includes("c.h.")) {
-                        continue;
-                    }
+                    const discLower = disciplina.toLowerCase();
 
-                    // Remove prefixos de código (ex: "INF.001 - " ou "337 - ")
+                    // Ignora totais, variáveis JS não processadas e dados de perfil
+                    const ehInvalido = termosInvalidos.some(termo => discLower.includes(termo));
+                    if (ehInvalido || !isNaN(disciplina) || disciplina.length < 3) continue;
+
+                    // Limpa código da disciplina antes do hífem (ex: "INF001 - Banco de Dados" -> "Banco de Dados")
                     if (disciplina.includes("-")) {
                         const partes = disciplina.split("-");
                         if (partes.length > 1 && partes[0].trim().length <= 12) {
@@ -202,33 +206,51 @@ export default {
 
                     let totalAulas = 80;
                     let faltas = 0;
-                    let freq = "100%";
+                    let freqVal = 100;
 
-                    for (const val of cols) {
+                    // Varre colunas para encontrar carga horária, faltas reais e frequência %
+                    for (let i = 0; i < cols.length; i++) {
+                        const val = cols[i];
+
                         if (val.includes("%")) {
-                            freq = val;
+                            const parsedFreq = parseFloat(val.replace("%", "").replace(",", "."));
+                            if (!isNaN(parsedFreq)) freqVal = parsedFreq;
                         } else if (!isNaN(val) && val !== "") {
                             const valNum = parseInt(val, 10);
-                            if (valNum >= 30 && valNum <= 240) totalAulas = valNum;
-                            else if (valNum >= 0 && valNum < 30) faltas = valNum;
+                            // Extrai carga horária total da disciplina
+                            if (valNum >= 30 && valNum <= 240) {
+                                totalAulas = valNum;
+                            } 
+                            // Extrai contagem real de faltas acumuladas
+                            else if (valNum > 0 && valNum < 30 && i > 2) {
+                                faltas = valNum;
+                            }
                         }
+                    }
+
+                    // Se a frequência for menor que 100% e as faltas não foram capturadas diretamente da coluna:
+                    // Calcula as faltas acumuladas através da porcentagem de frequência e aulas dadas
+                    if (faltas === 0 && freqVal < 100) {
+                        const percentualPerdido = (100 - freqVal) / 100;
+                        faltas = Math.round(totalAulas * percentualPerdido);
                     }
 
                     const limiteMax = Math.floor(totalAulas * 0.25);
                     const restantes = limiteMax - faltas;
+                    const freqFormatada = freqVal.toFixed(2) + "%";
 
                     dadosMaterias.push({
                         disciplina,
                         total_aulas: totalAulas,
                         faltas,
-                        freq_atual: freq,
+                        freq_atual: freqFormatada,
                         limite_max: limiteMax,
                         restantes
                     });
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Não foi possível extrair a tabela de matérias do boletim." }), {
+                    return new Response(JSON.stringify({ erro: "Não foi possível extrair disciplinas válidas do boletim." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
