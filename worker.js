@@ -89,10 +89,6 @@ const HTML_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-function cleanText(html) {
-    return html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-}
-
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
@@ -111,133 +107,76 @@ export default {
                     });
                 }
 
-                const loginUrl = "https://suap.ifba.edu.br/accounts/login/";
-                const loginPageRes = await fetch(loginUrl);
-                const loginHtml = await loginPageRes.text();
-                const setCookie = loginPageRes.headers.get('set-cookie') || '';
-
-                const csrfMatch = loginHtml.match(/name=["']csrfmiddlewaretoken["']\s+value=["']([^"']+)["']/);
-                if (!csrfMatch) {
-                    return new Response(JSON.stringify({ erro: "Não foi possível obter o token de segurança do SUAP." }), {
-                        status: 500,
-                        headers: { "Content-Type": "application/json" }
-                    });
-                }
-
-                const csrfToken = csrfMatch[1];
-                const bodyParams = new URLSearchParams({
-                    'username': usuario,
-                    'password': senha,
-                    'csrfmiddlewaretoken': csrfToken
-                });
-
-                const postRes = await fetch(loginUrl, {
+                // Autenticação via API de Tokens do SUAP
+                const tokenRes = await fetch("https://suap.ifba.edu.br/api/v2/autenticacao/token/", {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Referer': loginUrl,
-                        'Cookie': setCookie
-                    },
-                    body: bodyParams.toString()
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: usuario, password: senha })
                 });
 
-                const postHtml = await postRes.text();
-                if (postHtml.includes("Usuário ou senha inválidos")) {
+                if (tokenRes.status === 401 || tokenRes.status === 400) {
                     return new Response(JSON.stringify({ erro: "Matrícula ou senha incorretas." }), {
                         status: 401,
                         headers: { "Content-Type": "application/json" }
                     });
                 }
 
-                const authCookie = postRes.headers.get('set-cookie') || setCookie;
-                
-                // Requisição para a página principal do aluno
-                const alunoUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/";
-                const alunoRes = await fetch(alunoUrl, {
-                    headers: { 'Cookie': authCookie }
-                });
-                const alunoHtml = await alunoRes.text();
+                const tokenData = await tokenRes.json();
+                const jwtToken = tokenData.access;
 
-                // Regex para capturar linhas de tabelas de diários/boletim
-                const trBlocks = alunoHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+                if (!jwtToken) {
+                    return new Response(JSON.stringify({ erro: "Não foi possível autenticar junto à API do SUAP." }), {
+                        status: 500,
+                        headers: { "Content-Type": "application/json" }
+                    });
+                }
+
+                // Consulta dados do boletim na API do SUAP
+                const apiHeaders = { 'Authorization': 'Bearer ' + jwtToken };
+                const boletimApiRes = await fetch("https://suap.ifba.edu.br/api/v2/minhas-informacoes/boletim/", {
+                    headers: apiHeaders
+                });
+
+                const boletimData = await boletimApiRes.json();
                 const dadosMaterias = [];
                 let textoMensagem = "📊 *BOLETIM SUAP - CONTROLE DE FALTAS*\n\n";
 
-                for (const tr of trBlocks) {
-                    const tdBlocks = tr.match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi) || [];
-                    if (tdBlocks.length < 3) continue;
-
-                    const cols = tdBlocks.map(cleanText);
-                    const trRaw = tr.toLowerCase();
-
-                    if (trRaw.includes('manual') || trRaw.includes('${') || trRaw.includes('c.h.') || trRaw.includes('componente')) {
-                        continue;
-                    }
-
-                    // Tenta extrair o nome da disciplina no link <a> ou na segunda coluna
-                    let disciplina = "";
-                    const aMatch = tr.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
-                    if (aMatch) {
-                        disciplina = cleanText(aMatch[1]);
-                    } else if (cols[1] && cols[1].length > 3) {
-                        disciplina = cols[1];
-                    } else {
-                        disciplina = cols[0];
-                    }
-
-                    // Limpa códigos de disciplina prefixados (ex: "INF.001 - MATEMÁTICA" -> "MATEMÁTICA")
-                    if (disciplina.includes('-')) {
-                        const partes = disciplina.split('-');
-                        if (partes.length > 1 && partes[0].trim().length <= 10) {
-                            disciplina = partes.slice(1).join('-').trim();
+                if (Array.isArray(boletimData)) {
+                    for (const item of boletimData) {
+                        let disciplina = item.disciplina || item.componente_curricular || "";
+                        if (disciplina.includes('-')) {
+                            disciplina = disciplina.split('-').slice(1).join('-').trim();
                         }
+
+                        const totalAulas = item.carga_horaria || item.aulas_dadas || 80;
+                        const faltas = item.numero_faltas || 0;
+                        const freq = item.percentual_carga_horaria_frequentada ? item.percentual_carga_horaria_frequentada + "%" : "100%";
+
+                        const limiteMax = Math.floor(totalAulas * 0.25);
+                        const restantes = limiteMax - faltas;
+
+                        dadosMaterias.push({
+                            disciplina: disciplina || "Disciplina sem nome",
+                            total_aulas: totalAulas,
+                            faltas: faltas,
+                            freq_atual: freq,
+                            limite_max: limiteMax,
+                            restantes: restantes
+                        });
+
+                        let alerta = "✅ *OK*";
+                        if (restantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(restantes) + " além do limite)";
+                        else if (restantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
+
+                        textoMensagem += "🔹 *" + disciplina + "*\n";
+                        textoMensagem += "   • Faltas acumuladas: " + faltas + " de " + limiteMax + " permitidas\n";
+                        textoMensagem += "   • Frequência atual: " + freq + "\n";
+                        textoMensagem += "   • Faltas restantes permitidas: *" + restantes + "* " + alerta + "\n\n";
                     }
-
-                    if (!disciplina || disciplina.length < 3 || disciplina.includes('${') || disciplina.toLowerCase() === 'manual') {
-                        continue;
-                    }
-
-                    let totalAulasMateria = 80;
-                    let faltasAtuais = 0;
-                    let freqRaw = "100%";
-
-                    for (const val of cols) {
-                        if (val.includes('%')) {
-                            freqRaw = val;
-                        } else if (!isNaN(val) && val.trim() !== '') {
-                            const num = parseInt(val, 10);
-                            if (num >= 20 && num <= 200) {
-                                totalAulasMateria = num;
-                            } else if (num >= 0 && num < 20) {
-                                faltasAtuais = num;
-                            }
-                        }
-                    }
-
-                    const limiteMaxFaltas = Math.floor(totalAulasMateria * 0.25);
-                    const faltasRestantes = limiteMaxFaltas - faltasAtuais;
-
-                    dadosMaterias.push({
-                        disciplina,
-                        total_aulas: totalAulasMateria,
-                        faltas: faltasAtuais,
-                        freq_atual: freqRaw,
-                        limite_max: limiteMaxFaltas,
-                        restantes: faltasRestantes
-                    });
-
-                    let alerta = "✅ *OK*";
-                    if (faltasRestantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(faltasRestantes) + " além do limite)";
-                    else if (faltasRestantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
-
-                    textoMensagem += "🔹 *" + disciplina + "*\n";
-                    textoMensagem += "   • Faltas acumuladas: " + faltasAtuais + " de " + limiteMaxFaltas + " permitidas\n";
-                    textoMensagem += "   • Frequência atual: " + freqRaw + "\n";
-                    textoMensagem += "   • Faltas restantes permitidas: *" + faltasRestantes + "* " + alerta + "\n\n";
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina encontrada. Verifique se as notas/faltas já foram publicadas pelo IFBA para o seu usuário." }), {
+                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina retornada pela API do SUAP para o período letivo corrente." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
@@ -255,7 +194,7 @@ export default {
                 });
 
             } catch (err) {
-                return new Response(JSON.stringify({ erro: "Erro no servidor: " + err.message }), {
+                return new Response(JSON.stringify({ erro: "Erro na API: " + err.message }), {
                     status: 500,
                     headers: { "Content-Type": "application/json" }
                 });
