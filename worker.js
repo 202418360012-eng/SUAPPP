@@ -165,22 +165,18 @@ export default {
                 });
                 const html = await res.text();
 
-                // Termos gerais de cabeçalho, perfil do aluno ou totais para ignorar
-                const termosInvalidos = [
-                    "matrícula", "integrado", "técnico", "curso", "ingresso", "cota", "lugar",
-                    "matutino", "vespertino", "noturno", "expedição", "diploma", "pesquisa",
-                    "observação", "aluno", "sistec", "mec", "impressão", "referência", "suap",
-                    "aulas", "total", "componente", "carga horária", "frequência", "${"
-                ];
-
+                // Extrai especificamente as tabelas de boletim com a classe .borda-padrao ou .boletim-aluno
                 const trMatches = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
                 const dadosMaterias = [];
                 const materiasEncontradas = new Set();
 
                 for (const tr of trMatches) {
+                    // Ignora linhas que não pertençam à tabela de notas/boletim
+                    if (tr.includes('colspan') || tr.includes('<thead>') || tr.includes('<th>')) continue;
+
                     const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                    if (tdMatches.length < 4) continue;
+                    if (tdMatches.length < 5) continue;
 
                     const cols = tdMatches.map(cleanText);
 
@@ -189,11 +185,14 @@ export default {
 
                     const discLower = disciplina.toLowerCase();
 
-                    // Ignora totais, variáveis JS não processadas e dados de perfil
-                    const ehInvalido = termosInvalidos.some(termo => discLower.includes(termo));
-                    if (ehInvalido || !isNaN(disciplina) || disciplina.length < 3) continue;
+                    // Ignora nome de pessoas, cabeçalhos do perfil do aluno e totais do curso
+                    if (discLower.includes("cláudio") || discLower.includes("freire") || 
+                        discLower.includes("componente") || discLower.includes("aulas") || 
+                        discLower.includes("total") || !isNaN(disciplina)) {
+                        continue;
+                    }
 
-                    // Limpa código da disciplina antes do hífem (ex: "INF001 - Banco de Dados" -> "Banco de Dados")
+                    // Limpa código da disciplina (ex: "INF001 - Banco de Dados" -> "Banco de Dados")
                     if (disciplina.includes("-")) {
                         const partes = disciplina.split("-");
                         if (partes.length > 1 && partes[0].trim().length <= 12) {
@@ -202,38 +201,31 @@ export default {
                     }
 
                     if (materiasEncontradas.has(disciplina.toLowerCase())) continue;
-                    materiasEncontradas.add(disciplina.toLowerCase());
 
-                    let totalAulas = 80;
-                    let faltas = 0;
+                    // Mapeamento das colunas da tabela de boletim do SUAP
+                    const totalAulas = parseInt(cols[2], 10) || 80;
+                    
+                    // A porcentagem de frequência está na última coluna da tabela
+                    const freqTexto = cols[cols.length - 1];
                     let freqVal = 100;
-
-                    // Varre colunas para encontrar carga horária, faltas reais e frequência %
-                    for (let i = 0; i < cols.length; i++) {
-                        const val = cols[i];
-
-                        if (val.includes("%")) {
-                            const parsedFreq = parseFloat(val.replace("%", "").replace(",", "."));
-                            if (!isNaN(parsedFreq)) freqVal = parsedFreq;
-                        } else if (!isNaN(val) && val !== "") {
-                            const valNum = parseInt(val, 10);
-                            // Extrai carga horária total da disciplina
-                            if (valNum >= 30 && valNum <= 240) {
-                                totalAulas = valNum;
-                            } 
-                            // Extrai contagem real de faltas acumuladas
-                            else if (valNum > 0 && valNum < 30 && i > 2) {
-                                faltas = valNum;
-                            }
-                        }
+                    if (freqTexto.includes("%")) {
+                        freqVal = parseFloat(freqTexto.replace("%", "").replace(",", ".")) || 100;
                     }
 
-                    // Se a frequência for menor que 100% e as faltas não foram capturadas diretamente da coluna:
-                    // Calcula as faltas acumuladas através da porcentagem de frequência e aulas dadas
-                    if (faltas === 0 && freqVal < 100) {
+                    // Cálculo direto de faltas via frequência (caso a coluna de faltas não venha com o inteiro absoluto)
+                    let faltas = 0;
+                    const colFaltas = parseInt(cols[4], 10);
+                    
+                    if (!isNaN(colFaltas) && freqVal < 100) {
+                        faltas = colFaltas;
+                    } else if (freqVal < 100) {
                         const percentualPerdido = (100 - freqVal) / 100;
                         faltas = Math.round(totalAulas * percentualPerdido);
+                    } else {
+                        faltas = 0;
                     }
+
+                    materiasEncontradas.add(disciplina.toLowerCase());
 
                     const limiteMax = Math.floor(totalAulas * 0.25);
                     const restantes = limiteMax - faltas;
@@ -250,7 +242,7 @@ export default {
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Não foi possível extrair disciplinas válidas do boletim." }), {
+                    return new Response(JSON.stringify({ erro: "Não foi possível extrair a lista de disciplinas do boletim." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
