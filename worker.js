@@ -89,6 +89,21 @@ const HTML_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
+function cleanText(text) {
+    return text.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function parseCookies(headers) {
+    const cookies = [];
+    headers.forEach((value, key) => {
+        if (key.toLowerCase() === 'set-cookie') {
+            const parts = value.split(';');
+            if (parts.length > 0) cookies.push(parts[0].trim());
+        }
+    });
+    return cookies.join('; ');
+}
+
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
@@ -107,76 +122,126 @@ export default {
                     });
                 }
 
-                // Autenticação via API de Tokens do SUAP
-                const tokenRes = await fetch("https://suap.ifba.edu.br/api/v2/autenticacao/token/", {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: usuario, password: senha })
+                const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+                const loginUrl = "https://suap.ifba.edu.br/accounts/login/";
+
+                // 1. Obter formulário inicial e CSRF Token
+                const initialRes = await fetch(loginUrl, {
+                    headers: { 'User-Agent': userAgent }
+                });
+                const initialHtml = await initialRes.text();
+                const initialCookies = parseCookies(initialRes.headers);
+
+                const csrfMatch = initialHtml.match(/name=["']csrfmiddlewaretoken["']\s+value=["']([^"']+)["']/);
+                if (!csrfMatch) {
+                    return new Response(JSON.stringify({ erro: "Não foi possível conectar ao servidor do SUAP." }), {
+                        status: 500,
+                        headers: { "Content-Type": "application/json" }
+                    });
+                }
+
+                const csrfToken = csrfMatch[1];
+                const loginBody = new URLSearchParams({
+                    'username': usuario,
+                    'password': senha,
+                    'csrfmiddlewaretoken': csrfToken,
+                    'next': ''
                 });
 
-                if (tokenRes.status === 401 || tokenRes.status === 400) {
+                // 2. Realizar Login
+                const loginRes = await fetch(loginUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'User-Agent': userAgent,
+                        'Referer': loginUrl,
+                        'Cookie': initialCookies
+                    },
+                    body: loginBody.toString(),
+                    redirect: 'manual'
+                });
+
+                const authCookies = parseCookies(loginRes.headers) || initialCookies;
+                const postHtml = await loginRes.text();
+
+                if (postHtml.includes("Usuário ou senha inválidos") || postHtml.includes("Informe um usuário e senha válidos")) {
                     return new Response(JSON.stringify({ erro: "Matrícula ou senha incorretas." }), {
                         status: 401,
                         headers: { "Content-Type": "application/json" }
                     });
                 }
 
-                const tokenData = await tokenRes.json();
-                const jwtToken = tokenData.access;
-
-                if (!jwtToken) {
-                    return new Response(JSON.stringify({ erro: "Não foi possível autenticar junto à API do SUAP." }), {
-                        status: 500,
-                        headers: { "Content-Type": "application/json" }
-                    });
-                }
-
-                // Consulta dados do boletim na API do SUAP
-                const apiHeaders = { 'Authorization': 'Bearer ' + jwtToken };
-                const boletimApiRes = await fetch("https://suap.ifba.edu.br/api/v2/minhas-informacoes/boletim/", {
-                    headers: apiHeaders
+                // 3. Acessar página de diários / boletim do aluno
+                const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/";
+                const boletimRes = await fetch(boletimUrl, {
+                    headers: {
+                        'User-Agent': userAgent,
+                        'Cookie': authCookies
+                    }
                 });
 
-                const boletimData = await boletimApiRes.json();
+                const boletimHtml = await boletimRes.text();
+                const trMatches = boletimHtml.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
                 const dadosMaterias = [];
                 let textoMensagem = "📊 *BOLETIM SUAP - CONTROLE DE FALTAS*\n\n";
 
-                if (Array.isArray(boletimData)) {
-                    for (const item of boletimData) {
-                        let disciplina = item.disciplina || item.componente_curricular || "";
-                        if (disciplina.includes('-')) {
-                            disciplina = disciplina.split('-').slice(1).join('-').trim();
+                for (const tr of trMatches) {
+                    const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+                    if (tdMatches.length < 3) continue;
+
+                    const cols = tdMatches.map(cleanText);
+                    const lineText = cols.join(" ").toLowerCase();
+
+                    if (lineText.includes("componente") || lineText.includes("c.h.") || lineText.includes("manual")) continue;
+
+                    let disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
+                    if (disciplina.includes('-')) {
+                        const parts = disciplina.split('-');
+                        if (parts.length > 1 && parts[0].trim().length <= 10) {
+                            disciplina = parts.slice(1).join('-').trim();
                         }
-
-                        const totalAulas = item.carga_horaria || item.aulas_dadas || 80;
-                        const faltas = item.numero_faltas || 0;
-                        const freq = item.percentual_carga_horaria_frequentada ? item.percentual_carga_horaria_frequentada + "%" : "100%";
-
-                        const limiteMax = Math.floor(totalAulas * 0.25);
-                        const restantes = limiteMax - faltas;
-
-                        dadosMaterias.push({
-                            disciplina: disciplina || "Disciplina sem nome",
-                            total_aulas: totalAulas,
-                            faltas: faltas,
-                            freq_atual: freq,
-                            limite_max: limiteMax,
-                            restantes: restantes
-                        });
-
-                        let alerta = "✅ *OK*";
-                        if (restantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(restantes) + " além do limite)";
-                        else if (restantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
-
-                        textoMensagem += "🔹 *" + disciplina + "*\n";
-                        textoMensagem += "   • Faltas acumuladas: " + faltas + " de " + limiteMax + " permitidas\n";
-                        textoMensagem += "   • Frequência atual: " + freq + "\n";
-                        textoMensagem += "   • Faltas restantes permitidas: *" + restantes + "* " + alerta + "\n\n";
                     }
+
+                    if (!disciplina || disciplina.length < 3) continue;
+
+                    let totalAulas = 80;
+                    let faltas = 0;
+                    let freq = "100%";
+
+                    for (const val of cols) {
+                        if (val.includes('%')) {
+                            freq = val;
+                        } else if (!isNaN(val) && val !== '') {
+                            const num = parseInt(val, 10);
+                            if (num >= 20 && num <= 240) totalAulas = num;
+                            else if (num >= 0 && num < 20) faltas = num;
+                        }
+                    }
+
+                    const limiteMax = Math.floor(totalAulas * 0.25);
+                    const restantes = limiteMax - faltas;
+
+                    dadosMaterias.push({
+                        disciplina,
+                        total_aulas: totalAulas,
+                        faltas,
+                        freq_atual: freq,
+                        limite_max: limiteMax,
+                        restantes
+                    });
+
+                    let alerta = "✅ *OK*";
+                    if (restantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(restantes) + " além do limite)";
+                    else if (restantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
+
+                    textoMensagem += "🔹 *" + disciplina + "*\n";
+                    textoMensagem += "   • Faltas acumuladas: " + faltas + " de " + limiteMax + " permitidas\n";
+                    textoMensagem += "   • Frequência atual: " + freq + "\n";
+                    textoMensagem += "   • Faltas restantes permitidas: *" + restantes + "* " + alerta + "\n\n";
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina retornada pela API do SUAP para o período letivo corrente." }), {
+                    return new Response(JSON.stringify({ erro: "Sessão iniciada, mas nenhuma matéria foi identificada no perfil do aluno." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
@@ -194,7 +259,7 @@ export default {
                 });
 
             } catch (err) {
-                return new Response(JSON.stringify({ erro: "Erro na API: " + err.message }), {
+                return new Response(JSON.stringify({ erro: "Erro na conexão: " + err.message }), {
                     status: 500,
                     headers: { "Content-Type": "application/json" }
                 });
