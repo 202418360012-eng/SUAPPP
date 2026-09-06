@@ -1,0 +1,9 @@
+name = "suap-relatorio-faltas"
+main = "worker.py"
+compatibility_date = "2024-01-01"
+
+[python]
+compatibility_flags = ["python_workers"]
+
+[build]
+command = "pip install beautifulsoup4"
