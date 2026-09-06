@@ -159,43 +159,37 @@ export default {
 
                 const authCookies = parseCookies(loginRes.headers) || initialCookies;
 
-                // Acessa a aba específica do boletim
+                // Acesso direto à URL exata da aba do boletim do aluno
                 const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
                 const res = await fetch(boletimUrl, {
                     headers: { 'User-Agent': userAgent, 'Cookie': authCookies }
                 });
                 const html = await res.text();
 
-                // Termos cadastrais para descartar do relatório
-                const termosIgnorados = [
-                    "matrícula", "integrado", "técnico", "curso", "ingresso", "cota", "lugar",
-                    "matutino", "vespertino", "noturno", "expedição", "diploma", "pesquisa",
-                    "observação", "aluno", "sistec", "mec", "impressão", "referência", "suap",
-                    "consepe", "resolução", "valença", "nível", "médio"
-                ];
+                // Isola apenas o conteúdo das tabelas acadêmicas (exclui o cabeçalho de perfil)
+                const boletimSection = html.includes('id="tab_boletim"') 
+                    ? html.split('id="tab_boletim"')[1].split('</div>')[0] 
+                    : html;
+
+                const trMatches = boletimSection.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
                 const dadosMaterias = [];
                 const materiasEncontradas = new Set();
-
-                // Extrai especificamente as linhas das tabelas do boletim escolar
-                const trMatches = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
                 for (const tr of trMatches) {
                     const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
                     if (tdMatches.length < 3) continue;
 
                     const cols = tdMatches.map(cleanText);
-                    let disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
 
-                    if (!disciplina) continue;
+                    // A segunda coluna no boletim do SUAP traz o nome da disciplina
+                    let disciplina = cols[1] && cols[1].length > 2 ? cols[1] : cols[0];
 
-                    const discLower = disciplina.toLowerCase();
+                    if (!disciplina || disciplina.toLowerCase().includes("componente") || disciplina.toLowerCase().includes("c.h.")) {
+                        continue;
+                    }
 
-                    // Ignora qualquer campo do perfil do aluno
-                    const ehIgnorado = termosIgnorados.some(termo => discLower.includes(termo));
-                    if (ehIgnorado || !isNaN(disciplina) || disciplina.length < 4) continue;
-
-                    // Formata nomes que contêm códigos (Ex: "INF.01 - MATEMÁTICA" -> "MATEMÁTICA")
+                    // Remove prefixos de código (ex: "INF.001 - " ou "337 - ")
                     if (disciplina.includes("-")) {
                         const partes = disciplina.split("-");
                         if (partes.length > 1 && partes[0].trim().length <= 12) {
@@ -206,16 +200,15 @@ export default {
                     if (materiasEncontradas.has(disciplina.toLowerCase())) continue;
                     materiasEncontradas.add(disciplina.toLowerCase());
 
-                    // Busca valores reais nas colunas do boletim
                     let totalAulas = 80;
                     let faltas = 0;
                     let freq = "100%";
 
-                    for (const colVal of cols) {
-                        if (colVal.includes("%")) {
-                            freq = colVal;
-                        } else if (!isNaN(colVal) && colVal !== "") {
-                            const valNum = parseInt(colVal, 10);
+                    for (const val of cols) {
+                        if (val.includes("%")) {
+                            freq = val;
+                        } else if (!isNaN(val) && val !== "") {
+                            const valNum = parseInt(val, 10);
                             if (valNum >= 30 && valNum <= 240) totalAulas = valNum;
                             else if (valNum >= 0 && valNum < 30) faltas = valNum;
                         }
@@ -235,7 +228,7 @@ export default {
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Apenas dados cadastrais foram encontrados no boletim." }), {
+                    return new Response(JSON.stringify({ erro: "Não foi possível extrair a tabela de matérias do boletim." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
