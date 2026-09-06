@@ -1,8 +1,7 @@
-name = "suap-relatorio-faltas"
+name = "suappp"
 main = "worker.py"
 compatibility_date = "2024-01-01"
 
-[python]
 compatibility_flags = ["python_workers"]
 
 [build]
