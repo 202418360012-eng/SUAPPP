@@ -150,8 +150,6 @@ export default {
                 }
 
                 const authCookie = postRes.headers.get('set-cookie') || setCookie;
-                
-                // Busca a página do boletim do aluno
                 const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
                 const boletimRes = await fetch(boletimUrl, {
                     headers: { 'Cookie': authCookie }
@@ -168,13 +166,23 @@ export default {
 
                     if (cols.length < 3) continue;
 
-                    const colTexto = cols.join(" ").toLowerCase();
-                    if (colTexto.includes('disciplina') || colTexto.includes('carga horária') || colTexto.includes('c.h.')) continue;
+                    const trTexto = tr.toLowerCase();
+                    if (trTexto.includes('manual') || trTexto.includes('${') || trTexto.includes('c.h.')) continue;
 
-                    let disciplina = cols[1] && cols[1].length > 2 ? cols[1] : cols[0];
-                    if (!disciplina || disciplina.length < 3) continue;
+                    // Busca o texto dentro da tag <a> da coluna da disciplina
+                    let disciplina = "";
+                    const aMatch = tr.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+                    if (aMatch) {
+                        disciplina = stripTags(aMatch[1]);
+                    } else {
+                        disciplina = cols[1] && cols[1].length > 3 ? cols[1] : cols[0];
+                    }
 
-                    let totalAulasMateria = 80; // Carga horária padrão caso não seja encontrada explicitamente
+                    if (!disciplina || disciplina.length < 3 || disciplina.includes('${') || disciplina.toLowerCase() === 'manual') {
+                        continue;
+                    }
+
+                    let totalAulasMateria = 80;
                     let faltasAtuais = 0;
                     let freqRaw = "100%";
 
@@ -214,7 +222,7 @@ export default {
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina encontrada no boletim do período atual. Verifique se o semestre letivo já foi iniciado no SUAP." }), {
+                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina válida encontrada no boletim." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
