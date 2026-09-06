@@ -165,18 +165,16 @@ export default {
                 });
                 const html = await res.text();
 
-                // Extrai especificamente as tabelas de boletim com a classe .borda-padrao ou .boletim-aluno
                 const trMatches = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
 
                 const dadosMaterias = [];
                 const materiasEncontradas = new Set();
 
                 for (const tr of trMatches) {
-                    // Ignora linhas que não pertençam à tabela de notas/boletim
                     if (tr.includes('colspan') || tr.includes('<thead>') || tr.includes('<th>')) continue;
 
                     const tdMatches = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-                    if (tdMatches.length < 5) continue;
+                    if (tdMatches.length < 4) continue;
 
                     const cols = tdMatches.map(cleanText);
 
@@ -185,14 +183,12 @@ export default {
 
                     const discLower = disciplina.toLowerCase();
 
-                    // Ignora nome de pessoas, cabeçalhos do perfil do aluno e totais do curso
                     if (discLower.includes("cláudio") || discLower.includes("freire") || 
                         discLower.includes("componente") || discLower.includes("aulas") || 
                         discLower.includes("total") || !isNaN(disciplina)) {
                         continue;
                     }
 
-                    // Limpa código da disciplina (ex: "INF001 - Banco de Dados" -> "Banco de Dados")
                     if (disciplina.includes("-")) {
                         const partes = disciplina.split("-");
                         if (partes.length > 1 && partes[0].trim().length <= 12) {
@@ -202,27 +198,38 @@ export default {
 
                     if (materiasEncontradas.has(disciplina.toLowerCase())) continue;
 
-                    // Mapeamento das colunas da tabela de boletim do SUAP
-                    const totalAulas = parseInt(cols[2], 10) || 80;
-                    
-                    // A porcentagem de frequência está na última coluna da tabela
-                    const freqTexto = cols[cols.length - 1];
+                    // Procura o valor percentual de frequência e valores numéricos da linha
                     let freqVal = 100;
-                    if (freqTexto.includes("%")) {
-                        freqVal = parseFloat(freqTexto.replace("%", "").replace(",", ".")) || 100;
+                    let totalAulas = 80;
+                    let aulasDadas = 0;
+                    let numValores = [];
+
+                    for (const col of cols) {
+                        if (col.includes("%")) {
+                            freqVal = parseFloat(col.replace("%", "").replace(",", ".")) || 100;
+                        } else if (!isNaN(col) && col !== "") {
+                            numValores.push(parseInt(col, 10));
+                        }
                     }
 
-                    // Cálculo direto de faltas via frequência (caso a coluna de faltas não venha com o inteiro absoluto)
+                    if (numValores.length >= 1) {
+                        const cargas = numValores.filter(v => v >= 30 && v <= 240);
+                        if (cargas.length > 0) totalAulas = cargas[0];
+                    }
+
+                    // Aulas ministradas até o momento
+                    if (numValores.length >= 2) {
+                        const dadas = numValores.filter(v => v > 0 && v < totalAulas);
+                        if (dadas.length > 0) aulasDadas = dadas[0];
+                    }
+
+                    // Cálculo de faltas reais
                     let faltas = 0;
-                    const colFaltas = parseInt(cols[4], 10);
-                    
-                    if (!isNaN(colFaltas) && freqVal < 100) {
-                        faltas = colFaltas;
-                    } else if (freqVal < 100) {
+                    if (freqVal < 100) {
                         const percentualPerdido = (100 - freqVal) / 100;
-                        faltas = Math.round(totalAulas * percentualPerdido);
-                    } else {
-                        faltas = 0;
+                        const baseCalculo = aulasDadas > 0 ? aulasDadas : totalAulas;
+                        faltas = Math.round(baseCalculo * percentualPerdido);
+                        if (faltas === 0) faltas = 1;
                     }
 
                     materiasEncontradas.add(disciplina.toLowerCase());
