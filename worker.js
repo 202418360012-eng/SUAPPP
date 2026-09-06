@@ -150,6 +150,8 @@ export default {
                 }
 
                 const authCookie = postRes.headers.get('set-cookie') || setCookie;
+                
+                // Busca a página do boletim do aluno
                 const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
                 const boletimRes = await fetch(boletimUrl, {
                     headers: { 'Cookie': authCookie }
@@ -164,28 +166,30 @@ export default {
                     const tdBlocks = tr.match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi) || [];
                     const cols = tdBlocks.map(stripTags);
 
-                    if (cols.length < 5) continue;
-                    if (cols[0].toLowerCase().includes('disciplina') || cols[1].toLowerCase().includes('disciplina')) continue;
+                    if (cols.length < 3) continue;
 
-                    const disciplina = cols[1].length > 2 ? cols[1] : cols[0];
-                    let totalAulasMateria = null;
+                    const colTexto = cols.join(" ").toLowerCase();
+                    if (colTexto.includes('disciplina') || colTexto.includes('carga horária') || colTexto.includes('c.h.')) continue;
+
+                    let disciplina = cols[1] && cols[1].length > 2 ? cols[1] : cols[0];
+                    if (!disciplina || disciplina.length < 3) continue;
+
+                    let totalAulasMateria = 80; // Carga horária padrão caso não seja encontrada explicitamente
                     let faltasAtuais = 0;
                     let freqRaw = "100%";
 
-                    for (const val of cols.slice(2)) {
+                    for (const val of cols) {
                         if (val.includes('%')) {
                             freqRaw = val;
                         } else if (!isNaN(val) && val.trim() !== '') {
                             const num = parseInt(val, 10);
-                            if (totalAulasMateria === null && num > 10) {
+                            if (num > 15 && num <= 200) {
                                 totalAulasMateria = num;
-                            } else if (totalAulasMateria !== null) {
+                            } else if (num >= 0 && num <= 60) {
                                 faltasAtuais = num;
                             }
                         }
                     }
-
-                    if (!totalAulasMateria) continue;
 
                     const limiteMaxFaltas = Math.floor(totalAulasMateria * 0.25);
                     const faltasRestantes = limiteMaxFaltas - faltasAtuais;
@@ -210,7 +214,7 @@ export default {
                 }
 
                 if (dadosMaterias.length === 0) {
-                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina com faltas registrada no período atual." }), {
+                    return new Response(JSON.stringify({ erro: "Nenhuma disciplina encontrada no boletim do período atual. Verifique se o semestre letivo já foi iniciado no SUAP." }), {
                         status: 404,
                         headers: { "Content-Type": "application/json" }
                     });
