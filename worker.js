@@ -61,7 +61,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             const data = await response.json();
             
             if (data.erro) {
-                resultadoDiv.innerHTML = `<p style="color: #ef4444; text-align: center;">\${data.erro}</p>`;
+                resultadoDiv.innerHTML = '<p style="color: #ef4444; text-align: center;">' + data.erro + '</p>';
                 return;
             }
 
@@ -71,19 +71,17 @@ const HTML_PAGE = `<!DOCTYPE html>
                 if (item.restantes < 0) statusClass = 'ESTOURADO';
                 else if (item.restantes <= 2) statusClass = 'PERIGO';
 
-                html += `
-                    <div class="card \${statusClass}">
-                        <span class="badge bg-\${statusClass}">\${statusClass}</span>
-                        <strong>\${item.disciplina}</strong><br>
-                        <small>Faltas acumuladas: \${item.faltas} de \${item.limite_max} permitidas</small><br>
-                        <small>Frequência atual: \${item.freq_atual}</small><br>
-                        <strong>Faltas restantes no curso: \${item.restantes}</strong>
-                    </div>
-                `;
+                html += '<div class="card ' + statusClass + '">' +
+                        '<span class="badge bg-' + statusClass + '">' + statusClass + '</span>' +
+                        '<strong>' + item.disciplina + '</strong><br>' +
+                        '<small>Faltas acumuladas: ' + item.faltas + ' de ' + item.limite_max + ' permitidas</small><br>' +
+                        '<small>Frequência atual: ' + item.freq_atual + '</small><br>' +
+                        '<strong>Faltas restantes no curso: ' + item.restantes + '</strong>' +
+                    '</div>';
             });
 
-            const urlWa = `https://api.whatsapp.com/send?phone=\${data.telefone}&text=\${encodeURIComponent(data.mensagem)}`;
-            html += `<a href="\${urlWa}" target="_blank" class="whatsapp-btn">📲 Enviar Relatório pelo WhatsApp</a>`;
+            const urlWa = 'https://api.whatsapp.com/send?phone=' + data.telefone + '&text=' + encodeURIComponent(data.mensagem);
+            html += '<a href="' + urlWa + '" target="_blank" class="whatsapp-btn">📲 Enviar Relatório pelo WhatsApp</a>';
 
             resultadoDiv.innerHTML = html;
         });
@@ -152,7 +150,7 @@ export default {
                 }
 
                 const authCookie = postRes.headers.get('set-cookie') || setCookie;
-                const boletimUrl = `https://suap.ifba.edu.br/edu/aluno/${usuario}/?tab=boletim`;
+                const boletimUrl = "https://suap.ifba.edu.br/edu/aluno/" + usuario + "/?tab=boletim";
                 const boletimRes = await fetch(boletimUrl, {
                     headers: { 'Cookie': authCookie }
                 });
@@ -202,13 +200,13 @@ export default {
                     });
 
                     let alerta = "✅ *OK*";
-                    if (faltasRestantes < 0) alerta = `🚨 *ESTOURADO!* (${Math.abs(faltasRestantes)} além do limite)`;
+                    if (faltasRestantes < 0) alerta = "🚨 *ESTOURADO!* (" + Math.abs(faltasRestantes) + " além do limite)";
                     else if (faltasRestantes <= 2) alerta = "⚠️ *ATENÇÃO! PRÓXIMO DO LIMITE*";
 
-                    textoMensagem += `🔹 *${disciplina}*\n`;
-                    textoMensagem += `   • Faltas acumuladas: ${faltasAtuais} de ${limiteMaxFaltas} permitidas\n`;
-                    textoMensagem += `   • Frequência atual: ${freqRaw}\n`;
-                    textoMensagem += `   • Faltas restantes permitidas: *${faltasRestantes}* ${alerta}\n\n`;
+                    textoMensagem += "🔹 *" + disciplina + "*\n";
+                    textoMensagem += "   • Faltas acumuladas: " + faltasAtuais + " de " + limiteMaxFaltas + " permitidas\n";
+                    textoMensagem += "   • Frequência atual: " + freqRaw + "\n";
+                    textoMensagem += "   • Faltas restantes permitidas: *" + faltasRestantes + "* " + alerta + "\n\n";
                 }
 
                 if (dadosMaterias.length === 0) {
@@ -230,7 +228,7 @@ export default {
                 });
 
             } catch (err) {
-                return new Response(JSON.stringify({ erro: `Erro no servidor: ${err.message}` }), {
+                return new Response(JSON.stringify({ erro: "Erro no servidor: " + err.message }), {
                     status: 500,
                     headers: { "Content-Type": "application/json" }
                 });
