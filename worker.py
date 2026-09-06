@@ -1,6 +1,7 @@
 import math
+import re
 import urllib.parse
-from bs4 import BeautifulSoup
+import json
 from js import Response, Headers
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -96,13 +97,14 @@ HTML_PAGE = """<!DOCTYPE html>
 </body>
 </html>"""
 
-
 async def fetch_with_cookies(url, options=None):
     if options is None:
         options = {}
     from js import fetch
     return await fetch(url, options)
 
+def strip_tags(html):
+    return re.sub(r'<[^>]*>', '', html).strip()
 
 async def handle_processar(request):
     try:
@@ -113,32 +115,27 @@ async def handle_processar(request):
 
         if not usuario or not senha:
             return Response.new(
-                '{"erro": "Matrícula e senha são obrigatórias."}', 
+                json.dumps({"erro": "Matrícula e senha são obrigatórias."}), 
                 status=400, 
                 headers=Headers.new({'Content-Type': 'application/json'})
             )
 
         login_url = "https://suap.ifba.edu.br/accounts/login/"
-        
-        # 1. Carrega página inicial de login para pegar CSRF e Cookies
         login_page_res = await fetch_with_cookies(login_url)
         login_html = await login_page_res.text()
-        
-        # Extrai cookies recebidos
         set_cookie = login_page_res.headers.get('set-cookie') or ''
-        
-        soup_login = BeautifulSoup(login_html, 'html.parser')
-        csrf_elem = soup_login.find('input', {'name': 'csrfmiddlewaretoken'})
-        if not csrf_elem:
+
+        # Busca do token CSRF via expressão regular
+        csrf_match = re.search(r'name=["\']csrfmiddlewaretoken["\']\s+value=["\']([^"\']+)["\']', login_html)
+        if not csrf_match:
             return Response.new(
-                '{"erro": "Não foi possível obter o token de segurança do SUAP."}', 
+                json.dumps({"erro": "Não foi possível obter o token de segurança do SUAP."}), 
                 status=500, 
                 headers=Headers.new({'Content-Type': 'application/json'})
             )
         
-        csrf_token = csrf_elem['value']
+        csrf_token = csrf_match.group(1)
 
-        # 2. Faz o POST de Login
         body_params = urllib.parse.urlencode({
             'username': usuario,
             'password': senha,
@@ -160,64 +157,44 @@ async def handle_processar(request):
         post_html = await post_res.text()
         if "Usuário ou senha inválidos" in post_html:
             return Response.new(
-                '{"erro": "Matrícula ou senha do SUAP incorretas."}', 
+                json.dumps({"erro": "Matrícula ou senha do SUAP incorretas."}), 
                 status=401, 
                 headers=Headers.new({'Content-Type': 'application/json'})
             )
 
-        # Atualiza cookies da sessão após login
         auth_cookie = post_res.headers.get('set-cookie') or set_cookie
-
-        # 3. Acessa a aba do boletim
         boletim_url = f"https://suap.ifba.edu.br/edu/aluno/{usuario}/?tab=boletim"
         boletim_headers = Headers.new({'Cookie': auth_cookie})
         boletim_res = await fetch_with_cookies(boletim_url, {'headers': boletim_headers})
         boletim_html = await boletim_res.text()
 
-        soup_boletim = BeautifulSoup(boletim_html, 'html.parser')
-        tabelas = soup_boletim.find_all('table')
-
-        if not tabelas:
-            return Response.new(
-                '{"erro": "Nenhuma tabela foi encontrada no boletim do SUAP."}', 
-                status=404, 
-                headers=Headers.new({'Content-Type': 'application/json'})
-            )
-
-        tabela_boletim = None
-        for t in tabelas:
-            texto_t = t.text.lower()
-            if 'disciplina' in texto_t or 'diário' in texto_t or 'c.h.' in texto_t:
-                tabela_boletim = t
-                break
-
-        if not tabela_boletim:
-            tabela_boletim = tabelas[0]
-
-        linhas = tabela_boletim.find_all('tr')
+        # Extração de linhas de tabelas usando Regex
+        tr_blocks = re.findall(r'<tr[^>]*>(.*?)</tr>', boletim_html, re.DOTALL | re.IGNORECASE)
+        
         dados_materias = []
         texto_mensagem = "📊 *BOLETIM SUAP - CONTROLE DE FALTAS*\n\n"
 
-        for linha in linhas:
-            colunas = linha.find_all(['td', 'th'])
-            if len(colunas) < 5:
+        for tr in tr_blocks:
+            td_blocks = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', tr, re.DOTALL | re.IGNORECASE)
+            cols = [strip_tags(td) for td in td_blocks]
+
+            if len(cols) < 5:
                 continue
 
-            texto_col0 = colunas[0].text.strip()
-            texto_col1 = colunas[1].text.strip()
+            texto_col0 = cols[0].lower()
+            texto_col1 = cols[1].lower()
 
-            if 'disciplina' in texto_col0.lower() or 'disciplina' in texto_col1.lower() or 'c.h.' in texto_col0.lower():
+            if 'disciplina' in texto_col0 or 'disciplina' in texto_col1 or 'c.h.' in texto_col0:
                 continue
 
-            disciplina = texto_col1 if len(texto_col1) > 2 else texto_col0
+            disciplina = cols[1] if len(cols[1]) > 2 else cols[0]
 
             try:
                 total_aulas_materia = None
                 faltas_atuais = 0
                 freq_raw = "100%"
 
-                for col in colunas[2:]:
-                    val = col.text.strip()
+                for val in cols[2:]:
                     if '%' in val:
                         freq_raw = val
                     elif val.isdigit():
@@ -259,7 +236,7 @@ async def handle_processar(request):
 
         if not dados_materias:
             return Response.new(
-                '{"erro": "Não foram encontradas disciplinas ou faltas registradas no período atual."}', 
+                json.dumps({"erro": "Não foram encontradas disciplinas ou faltas registradas no período atual."}), 
                 status=404, 
                 headers=Headers.new({'Content-Type': 'application/json'})
             )
@@ -267,7 +244,6 @@ async def handle_processar(request):
         texto_mensagem += "───────────────────────────\n"
         texto_mensagem += "_Relatório gerado via Painel Web SUAP._"
 
-        import json
         resposta_final = {
             'materias': dados_materias,
             'mensagem': texto_mensagem,
@@ -281,13 +257,11 @@ async def handle_processar(request):
         )
 
     except Exception as e:
-        import json
         return Response.new(
             json.dumps({'erro': f'Erro de processamento: {str(e)}'}), 
             status=500, 
             headers=Headers.new({'Content-Type': 'application/json'})
         )
-
 
 async def on_fetch(request, env):
     url = urllib.parse.urlparse(request.url)
