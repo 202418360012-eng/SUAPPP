@@ -1,5 +1,7 @@
-name = "suappp"
+name = "painel-suap-faltas"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-11-01"
 
-compatibility_flags = ["python_workers"]
+# Cron em UTC: 09:00 UTC = 06:00 em Brasília, de segunda a sexta
+[triggers]
+crons = ["0 9 * * 1-5"]
