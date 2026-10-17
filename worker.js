@@ -343,6 +343,61 @@ async function enviarWhatsApp(env, texto) {
   }
 }
 
+// ---------------------------------------------------------------------
+// TELEGRAM (alternativa gratuita e estável)
+// ---------------------------------------------------------------------
+async function enviarTelegram(env, texto) {
+  const api = "https://api.telegram.org/bot" + env.TELEGRAM_TOKEN + "/sendMessage";
+  const enviar = (extra) =>
+    fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: texto, ...extra }),
+    });
+
+  let r = await enviar({ parse_mode: "Markdown" });
+  if (!r.ok) r = await enviar({}); // se o Markdown falhar, manda texto simples
+  if (!r.ok) {
+    const corpo = await r.text();
+    throw new Error("Telegram retornou " + r.status + ": " + corpo.slice(0, 200));
+  }
+}
+
+// ---------------------------------------------------------------------
+// WHATSAPP via Whapi.Cloud (sandbox gratuito, conecta seu número por QR code)
+// ---------------------------------------------------------------------
+async function enviarWhapi(env, texto) {
+  const r = await fetch("https://gate.whapi.cloud/messages/text", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: "Bearer " + env.WHAPI_TOKEN,
+    },
+    body: JSON.stringify({ to: String(env.WA_PHONE).replace(/\D/g, ""), body: texto }),
+  });
+  if (!r.ok) {
+    const corpo = await r.text();
+    throw new Error("Whapi retornou " + r.status + ": " + corpo.slice(0, 200));
+  }
+}
+
+// Envia por todos os canais que estiverem configurados
+async function enviarNotificacao(env, texto) {
+  const temWhapi = env.WHAPI_TOKEN && env.WA_PHONE;
+  const temTelegram = env.TELEGRAM_TOKEN && env.TELEGRAM_CHAT_ID;
+  const temWhatsApp = env.CALLMEBOT_KEY && env.WA_PHONE;
+
+  if (!temWhapi && !temTelegram && !temWhatsApp) {
+    throw new Error(
+      "Nenhum canal de envio configurado. Cadastre WHAPI_TOKEN e WA_PHONE."
+    );
+  }
+  if (temWhapi) await enviarWhapi(env, texto);
+  if (temTelegram) await enviarTelegram(env, texto);
+  if (temWhatsApp) await enviarWhatsApp(env, texto);
+}
+
 async function rotinaDiaria(env) {
   // Hora de Brasília (UTC-3)
   const agora = new Date(Date.now() - 3 * 60 * 60 * 1000);
@@ -350,7 +405,7 @@ async function rotinaDiaria(env) {
 
   const materias = await buscarMaterias(env.SUAP_USER, env.SUAP_PASS);
   const msg = montarMensagemDoDia(materias, dia);
-  if (msg) await enviarWhatsApp(env, msg);
+  if (msg) await enviarNotificacao(env, msg);
   return !!msg;
 }
 
