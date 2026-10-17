@@ -5,4 +5,8 @@ compatibility_date = "2024-11-01"
 # Cron em UTC: 09:00 UTC = 06:00 em Brasília, de segunda a sexta
 # (no Cloudflare os números de dia são 1=domingo ... 7=sábado, por isso uso nomes)
 [triggers]
-crons = ["0 9 * * MON-FRI"]
+crons = [
+  "0 9 * * MON-FRI",    # 06:00 BRT, seg a sex: faltas das matérias do dia
+  "0 21 * * FRI",       # 18:00 BRT, sexta: faltas acumuladas
+  "30 13 * * SAT,SUN",  # 10:30 BRT: sábado = faltas acumuladas, domingo = semana que vem
+]

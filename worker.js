@@ -398,13 +398,107 @@ async function enviarNotificacao(env, texto) {
   if (temWhatsApp) await enviarWhatsApp(env, texto);
 }
 
-async function rotinaDiaria(env) {
+// ---------------------------------------------------------------------
+// PANORAMAS (sexta: faltas acumuladas / domingo: semana que vem)
+// ---------------------------------------------------------------------
+function acharMateria(materias, chave, excluir) {
+  return materias.find((x) => {
+    const n = normalizar(x.disciplina);
+    return n.includes(chave) && !(excluir && n.includes(excluir));
+  });
+}
+
+function emojiRisco(restantes, aulas) {
+  if (restantes < 0) return "🚨";
+  if (restantes < aulas) return "🚨";
+  if (restantes <= 2) return "⚠️";
+  return "✅";
+}
+
+// SEXTA: panorama das faltas que já tive, de todas as matérias
+function montarPanoramaSexta(materias) {
+  const ordenadas = [...materias].sort((a, b) => a.restantes - b.restantes);
+  const totalFaltas = materias.reduce((acc, m) => acc + m.faltas, 0);
+  const emRisco = materias.filter((m) => m.restantes <= 2).length;
+
+  let msg = "📊 *PANORAMA DA SEMANA - FALTAS ACUMULADAS*\n\n";
+  msg += "• Total de faltas no semestre: *" + totalFaltas + "*\n";
+  msg += "• Matérias em risco (restam 2 ou menos): *" + emRisco + "*\n\n";
+
+  for (const m of ordenadas) {
+    let status = "✅";
+    if (m.restantes < 0) status = "🚨 estourado";
+    else if (m.restantes <= 2) status = "⚠️ risco";
+    msg += "🔹 *" + m.disciplina + "*\n";
+    msg += "   " + m.faltas + " de " + m.limite_max + " faltas | freq. " + m.freq_atual + " | restam *" + m.restantes + "* " + status + "\n";
+  }
+  msg += "\n─────────────────────────\n_Panorama de sexta (ordenado do mais crítico)._";
+  return msg;
+}
+
+// DOMINGO: panorama das faltas que posso ter em cada dia da semana que vem
+function montarPanoramaDomingo(materias) {
+  // total de aulas de cada matéria na semana
+  const aulasSemana = {};
+  for (let d = 1; d <= 5; d++) {
+    for (const [chave, qtd, nome] of HORARIO[d]) {
+      aulasSemana[nome] = (aulasSemana[nome] || 0) + qtd;
+    }
+  }
+
+  let msg = "📅 *PANORAMA DA SEMANA QUE VEM - FALTAS*\n";
+  const cuidado = new Set();
+
+  for (let d = 1; d <= 5; d++) {
+    msg += "\n*" + NOMES_DIAS[d] + "*\n";
+    for (const [chave, qtd, nome, excluir] of HORARIO[d]) {
+      const m = acharMateria(materias, chave, excluir);
+      if (!m) {
+        msg += "• " + nome + " (" + qtd + "): não achei no boletim\n";
+        continue;
+      }
+      const emoji = emojiRisco(m.restantes, aulasSemana[nome]);
+      if (emoji !== "✅") cuidado.add(nome);
+      msg += "• " + nome + " (" + qtd + " aula" + (qtd > 1 ? "s" : "") + "): restam *" + m.restantes + "* " + emoji + "\n";
+    }
+  }
+
+  if (cuidado.size > 0) {
+    msg += "\n⚠️ *Cuidado nesta semana:* " + [...cuidado].join(", ") + "\n";
+  } else {
+    msg += "\n✅ Nenhuma matéria em risco para a semana.\n";
+  }
+  msg += "\n─────────────────────────\n_Panorama de domingo. 🚨 = faltar a semana toda estouraria o limite._";
+  return msg;
+}
+
+// ---------------------------------------------------------------------
+// ROTINA (escolhe a mensagem certa)
+// modo: "diario" | "sexta" | "domingo" | undefined (automático pelo horário)
+// ---------------------------------------------------------------------
+async function rotina(env, modo, diaForcado) {
   // Hora de Brasília (UTC-3)
   const agora = new Date(Date.now() - 3 * 60 * 60 * 1000);
-  const dia = agora.getUTCDay();
+  const dia = Number.isInteger(diaForcado) ? diaForcado : agora.getUTCDay();
+  const hora = agora.getUTCHours();
+
+  if (!modo) {
+    // Sábado (10:30) = faltas acumuladas; domingo (10:30) = semana que vem;
+    // sexta à noite (18:00) = faltas acumuladas; seg-sex de manhã (06:00) = matérias do dia
+    if (dia === 6) modo = "sexta";
+    else if (dia === 0) modo = "domingo";
+    else if (dia === 5 && hora >= 12) modo = "sexta";
+    else if (dia >= 1 && dia <= 5 && hora < 12) modo = "diario";
+    else return false;
+  }
 
   const materias = await buscarMaterias(env.SUAP_USER, env.SUAP_PASS);
-  const msg = montarMensagemDoDia(materias, dia);
+
+  let msg = null;
+  if (modo === "sexta") msg = montarPanoramaSexta(materias);
+  else if (modo === "domingo") msg = montarPanoramaDomingo(materias);
+  else msg = montarMensagemDoDia(materias, dia);
+
   if (msg) await enviarNotificacao(env, msg);
   return !!msg;
 }
@@ -415,7 +509,7 @@ async function rotinaDiaria(env) {
 export default {
   // Disparado pelo Cron Trigger
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(rotinaDiaria(env));
+    ctx.waitUntil(rotina(env));
   },
 
   async fetch(request, env, ctx) {
@@ -427,7 +521,13 @@ export default {
         return new Response("Não autorizado", { status: 401 });
       }
       try {
-        const enviou = await rotinaDiaria(env);
+        // Testes: /enviar?token=...&modo=diario|sexta|domingo&dia=1..5
+        const diaParam = parseInt(url.searchParams.get("dia"), 10);
+        const modoParam = url.searchParams.get("modo") || "diario";
+        if (!["diario", "sexta", "domingo"].includes(modoParam)) {
+          return new Response("modo inválido (use diario, sexta ou domingo)", { status: 400 });
+        }
+        const enviou = await rotina(env, modoParam, Number.isNaN(diaParam) ? undefined : diaParam);
         return new Response(enviou ? "Mensagem enviada!" : "Hoje não há aula (fim de semana).");
       } catch (err) {
         return new Response("Erro: " + err.message, { status: 500 });
