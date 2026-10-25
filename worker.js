@@ -1,7 +1,8 @@
 // =====================================================================
 //  Painel SUAP - Faltas (Cloudflare Worker)
 //  - Página web para gerar relatório manual (/)
-//  - Envio diário automático por WhatsApp via Cron + CallMeBot
+//  - Envio automático por WhatsApp via Cron + Whapi.Cloud
+//  - Monitor de notas novas (KV 'NOTAS'): /notas e /boletim (diagnóstico)
 //  - Teste manual: /enviar?token=SEU_TOKEN
 // =====================================================================
 
@@ -178,7 +179,7 @@ function json(obj, status = 200) {
 // ---------------------------------------------------------------------
 // SUAP: LOGIN + BOLETIM
 // ---------------------------------------------------------------------
-async function buscarMaterias(usuario, senha) {
+async function baixarBoletimHtml(usuario, senha) {
   const loginUrl = "https://suap.ifba.edu.br/accounts/login/";
 
   const initialRes = await fetch(loginUrl, { headers: { "User-Agent": UA } });
@@ -215,8 +216,10 @@ async function buscarMaterias(usuario, senha) {
     "https://suap.ifba.edu.br/edu/aluno/" + encodeURIComponent(usuario) + "/?tab=boletim",
     { headers: { "User-Agent": UA, Cookie: authCookies } }
   );
-  const html = await res.text();
+  return await res.text();
+}
 
+function parseMaterias(html) {
   const trs = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
   const dados = [];
   const vistas = new Set();
@@ -268,6 +271,10 @@ async function buscarMaterias(usuario, senha) {
     );
   }
   return dados;
+}
+
+async function buscarMaterias(usuario, senha) {
+  return parseMaterias(await baixarBoletimHtml(usuario, senha));
 }
 
 // ---------------------------------------------------------------------
@@ -376,10 +383,11 @@ async function enviarWhapi(env, texto) {
     },
     body: JSON.stringify({ to: String(env.WA_PHONE).replace(/\D/g, ""), body: texto }),
   });
+  const corpo = await r.text();
   if (!r.ok) {
-    const corpo = await r.text();
     throw new Error("Whapi retornou " + r.status + ": " + corpo.slice(0, 200));
   }
+  return "Whapi (" + r.status + "): " + corpo.slice(0, 300);
 }
 
 // Envia por todos os canais que estiverem configurados
@@ -393,9 +401,11 @@ async function enviarNotificacao(env, texto) {
       "Nenhum canal de envio configurado. Cadastre WHAPI_TOKEN e WA_PHONE."
     );
   }
-  if (temWhapi) await enviarWhapi(env, texto);
-  if (temTelegram) await enviarTelegram(env, texto);
-  if (temWhatsApp) await enviarWhatsApp(env, texto);
+  const detalhes = [];
+  if (temWhapi) detalhes.push(await enviarWhapi(env, texto));
+  if (temTelegram) { await enviarTelegram(env, texto); detalhes.push("Telegram: ok"); }
+  if (temWhatsApp) { await enviarWhatsApp(env, texto); detalhes.push("CallMeBot: ok"); }
+  return detalhes.join("\n");
 }
 
 // ---------------------------------------------------------------------
@@ -473,6 +483,171 @@ function montarPanoramaDomingo(materias) {
 }
 
 // ---------------------------------------------------------------------
+// MONITOR DE NOTAS (avisa quando sai uma nota nova em qualquer unidade)
+// Guarda a última foto do boletim no KV (binding NOTAS) e compara.
+// ---------------------------------------------------------------------
+// Colunas que NÃO são notas de unidade (faltas, frequência, médias, situação...)
+const COLUNAS_IGNORADAS =
+  /falta|freq|situa|m[eé]dia|\bmfd\b|\bmf\b|\bmd\b|%|c[oó]digo|disciplina|carga|aulas|total|resultado|obs|(^|\s)f\.?\d?(\s|$)/i;
+
+function celulasDaLinha(tr, tag) {
+  const re = new RegExp("<" + tag + "(\\s[^>]*)?>([\\s\\S]*?)<\\/" + tag + ">", "gi");
+  const out = [];
+  let m;
+  while ((m = re.exec(tr)) !== null) {
+    const attrs = m[1] || "";
+    const cs = attrs.match(/colspan\s*=\s*["']?(\d+)/i);
+    const rs = attrs.match(/rowspan\s*=\s*["']?(\d+)/i);
+    out.push({
+      texto: cleanText(m[2]),
+      colspan: cs ? parseInt(cs[1], 10) : 1,
+      rowspan: rs ? parseInt(rs[1], 10) : 1,
+    });
+  }
+  return out;
+}
+
+// Monta o rótulo de cada coluna lendo o cabeçalho (com colspan/rowspan)
+function montarCabecalho(html) {
+  const trs = html.match(/<tr[\s>][\s\S]*?<\/tr>/gi) || [];
+  const rotulos = [];
+  const ocupado = [];
+  let linha = 0;
+
+  for (const tr of trs) {
+    const tds = celulasDaLinha(tr, "td");
+    if (tds.length >= 6) break; // chegou nas linhas de dados
+    const ths = celulasDaLinha(tr, "th");
+    if (ths.length < 3 || tds.length > 0) continue;
+
+    ocupado[linha] = ocupado[linha] || [];
+    let col = 0;
+    for (const th of ths) {
+      while (ocupado[linha][col]) col++;
+      for (let c = 0; c < th.colspan; c++) {
+        if (th.texto) (rotulos[col + c] = rotulos[col + c] || []).push(th.texto);
+        for (let r = 1; r < th.rowspan; r++) {
+          ocupado[linha + r] = ocupado[linha + r] || [];
+          ocupado[linha + r][col + c] = true;
+        }
+      }
+      col += th.colspan;
+    }
+    linha++;
+  }
+  return Array.from(rotulos, (r) => (r ? [...new Set(r)].join(" ") : ""));
+}
+
+// Retorna { disciplina: { "rótulo da coluna": "valor" } } só com notas já lançadas
+function extrairNotas(html) {
+  const cabecalho = montarCabecalho(html);
+  const trs = html.match(/<tr[\s>][\s\S]*?<\/tr>/gi) || [];
+  const notas = {};
+  const vistas = new Set();
+
+  for (const tr of trs) {
+    if (tr.includes("colspan")) continue;
+    const tds = celulasDaLinha(tr, "td").map((c) => c.texto);
+    if (tds.length < 6) continue;
+
+    let disciplina = tds[1];
+    if (!disciplina) continue;
+    const low = disciplina.toLowerCase();
+    if (low.includes("total") || low.includes("componente")) continue;
+    if (disciplina.includes("-")) disciplina = disciplina.split("-").slice(1).join("-").trim();
+    if (vistas.has(disciplina.toLowerCase())) continue;
+    vistas.add(disciplina.toLowerCase());
+
+    for (let c = 6; c < tds.length; c++) {
+      const rotuloBase = cabecalho[c] || "Coluna " + (c + 1);
+      if (COLUNAS_IGNORADAS.test(rotuloBase)) continue;
+      const valor = tds[c];
+      if (!/\d/.test(valor)) continue; // vazio, "-" etc. = ainda não saiu
+      notas[disciplina] = notas[disciplina] || {};
+      const rotulo = notas[disciplina][rotuloBase] !== undefined ? rotuloBase + " (col " + (c + 1) + ")" : rotuloBase;
+      notas[disciplina][rotulo] = valor;
+    }
+  }
+  return { notas, cabecalho };
+}
+
+function contarNotas(notas) {
+  return Object.values(notas).reduce((acc, r) => acc + Object.keys(r).length, 0);
+}
+
+function montarMensagemNotas(novas, alteradas) {
+  let msg = "";
+  if (novas.length > 0) {
+    msg += "🆕 *NOVA NOTA LANÇADA!*\n";
+    const porMateria = {};
+    for (const n of novas) (porMateria[n.disc] = porMateria[n.disc] || []).push(n);
+    for (const [disc, itens] of Object.entries(porMateria)) {
+      msg += "\n📘 *" + disc + "*\n";
+      for (const i of itens) msg += "   • " + i.rotulo + ": *" + i.valor + "*\n";
+    }
+  }
+  if (alteradas.length > 0) {
+    msg += (msg ? "\n" : "") + "✏️ *NOTA ALTERADA*\n";
+    for (const a of alteradas) {
+      msg += "\n📘 *" + a.disc + "*\n   • " + a.rotulo + ": " + a.de + " → *" + a.para + "*\n";
+    }
+  }
+  msg += "\n─────────────────────────\n_Monitor de notas do SUAP._";
+  return msg;
+}
+
+function montarMensagemBaseline(notas) {
+  const qtdMaterias = Object.keys(notas).length;
+  let msg = "🔔 *MONITOR DE NOTAS ATIVADO!*\n\n";
+  msg += "Notas já lançadas agora: *" + contarNotas(notas) + "* em *" + qtdMaterias + "* matéria(s). ";
+  msg += "Vou conferir o SUAP quatro vezes por dia (a cada 6 horas) e avisar quando sair uma nota nova.\n";
+  for (const [disc, rotulos] of Object.entries(notas)) {
+    msg += "\n• *" + disc + "*: " + Object.entries(rotulos).map(([k, v]) => k + " " + v).join(" | ");
+  }
+  return msg;
+}
+
+async function verificarNotas(env) {
+  if (!env.NOTAS) throw new Error("O KV 'NOTAS' não está ligado ao Worker (veja o wrangler.toml).");
+
+  const html = await baixarBoletimHtml(env.SUAP_USER, env.SUAP_PASS);
+  parseMaterias(html); // se o login falhou, lança erro e NÃO mexe no histórico
+  const { notas } = extrairNotas(html);
+
+  const anteriorTxt = await env.NOTAS.get("snapshot");
+
+  // Primeira vez: só registra o que já existe e avisa que ativou
+  if (!anteriorTxt) {
+    await enviarNotificacao(env, montarMensagemBaseline(notas));
+    await env.NOTAS.put("snapshot", JSON.stringify(notas));
+    return "Monitor ativado. Notas já lançadas: " + contarNotas(notas);
+  }
+
+  const anterior = JSON.parse(anteriorTxt);
+  const novas = [];
+  const alteradas = [];
+  for (const [disc, rotulos] of Object.entries(notas)) {
+    for (const [rotulo, valor] of Object.entries(rotulos)) {
+      const antes = anterior[disc] ? anterior[disc][rotulo] : undefined;
+      if (antes === undefined) novas.push({ disc, rotulo, valor });
+      else if (antes !== valor) alteradas.push({ disc, rotulo, de: antes, para: valor });
+    }
+  }
+
+  if (novas.length === 0 && alteradas.length === 0) return "Sem notas novas.";
+
+  // Envia primeiro; só grava o histórico se o envio deu certo (senão tenta de novo depois)
+  await enviarNotificacao(env, montarMensagemNotas(novas, alteradas));
+
+  // Junta com o histórico para uma leitura incompleta do SUAP não gerar falso alarme depois
+  const unido = { ...anterior };
+  for (const [disc, rotulos] of Object.entries(notas)) unido[disc] = { ...(anterior[disc] || {}), ...rotulos };
+  await env.NOTAS.put("snapshot", JSON.stringify(unido));
+
+  return "Avisei: " + novas.length + " nova(s), " + alteradas.length + " alterada(s).";
+}
+
+// ---------------------------------------------------------------------
 // ROTINA (escolhe a mensagem certa)
 // modo: "diario" | "sexta" | "domingo" | undefined (automático pelo horário)
 // ---------------------------------------------------------------------
@@ -499,8 +674,9 @@ async function rotina(env, modo, diaForcado) {
   else if (modo === "domingo") msg = montarPanoramaDomingo(materias);
   else msg = montarMensagemDoDia(materias, dia);
 
-  if (msg) await enviarNotificacao(env, msg);
-  return !!msg;
+  if (!msg) return false;
+  const detalhes = await enviarNotificacao(env, msg);
+  return detalhes || true;
 }
 
 // ---------------------------------------------------------------------
@@ -509,7 +685,10 @@ async function rotina(env, modo, diaForcado) {
 export default {
   // Disparado pelo Cron Trigger
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(rotina(env));
+    // Cron das notas roda às 00:00, 06:00, 12:00 e 18:00 UTC (03:00, 09:00, 15:00 e 21:00 em Brasília)
+    const horaUtc = new Date(event.scheduledTime).getUTCHours();
+    const tarefa = [0, 6, 12, 18].includes(horaUtc) ? verificarNotas(env) : rotina(env);
+    ctx.waitUntil(tarefa.catch((e) => console.error("Falha no cron:", e.message)));
   },
 
   async fetch(request, env, ctx) {
@@ -528,7 +707,42 @@ export default {
           return new Response("modo inválido (use diario, sexta ou domingo)", { status: 400 });
         }
         const enviou = await rotina(env, modoParam, Number.isNaN(diaParam) ? undefined : diaParam);
-        return new Response(enviou ? "Mensagem enviada!" : "Hoje não há aula (fim de semana).");
+        if (!enviou) return new Response("Hoje não há aula (fim de semana).");
+        return new Response(
+          "Mensagem enviada!\n" + (typeof enviou === "string" ? enviou : ""),
+          { headers: { "Content-Type": "text/plain; charset=utf-8" } }
+        );
+      } catch (err) {
+        return new Response("Erro: " + err.message, { status: 500 });
+      }
+    }
+
+    // Monitor de notas manual: /notas?token=...  (&reset=1 zera o histórico)
+    if (url.pathname === "/notas") {
+      if (!env.TOKEN || url.searchParams.get("token") !== env.TOKEN) {
+        return new Response("Não autorizado", { status: 401 });
+      }
+      try {
+        if (url.searchParams.get("reset") === "1" && env.NOTAS) await env.NOTAS.delete("snapshot");
+        const resultado = await verificarNotas(env);
+        return new Response(resultado, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      } catch (err) {
+        return new Response("Erro: " + err.message, { status: 500 });
+      }
+    }
+
+    // Diagnóstico (não envia nada nem grava): /boletim?token=...
+    if (url.pathname === "/boletim") {
+      if (!env.TOKEN || url.searchParams.get("token") !== env.TOKEN) {
+        return new Response("Não autorizado", { status: 401 });
+      }
+      try {
+        const html = await baixarBoletimHtml(env.SUAP_USER, env.SUAP_PASS);
+        parseMaterias(html);
+        const { notas, cabecalho } = extrairNotas(html);
+        return new Response(JSON.stringify({ cabecalho, notas }, null, 2), {
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
       } catch (err) {
         return new Response("Erro: " + err.message, { status: 500 });
       }
