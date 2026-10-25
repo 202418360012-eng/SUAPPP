@@ -12,7 +12,7 @@ crons = [
   "0 9 * * MON-FRI",    # 06:00 BRT, seg a sex: faltas das matérias do dia
   "0 21 * * FRI",       # 18:00 BRT, sexta: faltas acumuladas
   "30 13 * * SAT,SUN",  # 10:30 BRT: sábado = faltas acumuladas, domingo = semana que vem
-  "15 0-4,9-23 * * *", # 20x por dia, de hora em hora das 06:15 às 01:15 BRT: monitor de notas
+  "15,45 0-4,9-23 * * *", # 40x por dia, a cada 30 min das 06:15 às 01:45 BRT: monitor de notas
 ]
 
 # Guarda a última foto das notas para comparar (namespace "suap-notas")
