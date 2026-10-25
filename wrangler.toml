@@ -2,6 +2,9 @@ name = "suappp"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
+# Não apagar as variáveis cadastradas no painel do Cloudflare a cada deploy
+keep_vars = true
+
 # Cron em UTC: 09:00 UTC = 06:00 em Brasília, de segunda a sexta
 # (no Cloudflare os números de dia são 1=domingo ... 7=sábado, por isso uso nomes)
 [triggers]
@@ -9,4 +12,10 @@ crons = [
   "0 9 * * MON-FRI",    # 06:00 BRT, seg a sex: faltas das matérias do dia
   "0 21 * * FRI",       # 18:00 BRT, sexta: faltas acumuladas
   "30 13 * * SAT,SUN",  # 10:30 BRT: sábado = faltas acumuladas, domingo = semana que vem
+  "0 0,6,12,18 * * *", # 03:00, 09:00, 15:00 e 21:00 BRT (a cada 6h): monitor de notas novas
 ]
+
+# Guarda a última foto das notas para comparar (namespace "suap-notas")
+[[kv_namespaces]]
+binding = "NOTAS"
+id = "b38bf079065f406dbd9ffc6d14929b8d"
