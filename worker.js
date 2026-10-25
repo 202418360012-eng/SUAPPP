@@ -600,7 +600,7 @@ function montarMensagemBaseline(notas) {
   const qtdMaterias = Object.keys(notas).length;
   let msg = "🔔 *MONITOR DE NOTAS ATIVADO!*\n\n";
   msg += "Notas já lançadas agora: *" + contarNotas(notas) + "* em *" + qtdMaterias + "* matéria(s). ";
-  msg += "Vou conferir o SUAP 20 vezes por dia (de hora em hora, das 06:15 à 01:15) e avisar quando sair uma nota nova.\n";
+  msg += "Vou conferir o SUAP 40 vezes por dia (a cada 30 minutos, das 06:15 à 01:45) e avisar quando sair uma nota nova.\n";
   for (const [disc, rotulos] of Object.entries(notas)) {
     msg += "\n• *" + disc + "*: " + Object.entries(rotulos).map(([k, v]) => k + " " + v).join(" | ");
   }
@@ -685,9 +685,9 @@ async function rotina(env, modo, diaForcado) {
 export default {
   // Disparado pelo Cron Trigger
   async scheduled(event, env, ctx) {
-    // O cron das notas dispara sempre no minuto 15 (os de faltas usam minuto 00 e 30)
+    // O cron das notas dispara nos minutos 15 e 45 (os de faltas usam minuto 00 e 30)
     const minutoUtc = new Date(event.scheduledTime).getUTCMinutes();
-    const tarefa = minutoUtc === 15 ? verificarNotas(env) : rotina(env);
+    const tarefa = minutoUtc === 15 || minutoUtc === 45 ? verificarNotas(env) : rotina(env);
     ctx.waitUntil(tarefa.catch((e) => console.error("Falha no cron:", e.message)));
   },
 
